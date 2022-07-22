@@ -3,6 +3,7 @@
 import eventlet
 eventlet.monkey_patch()
 
+import netaddr
 import queries
 import options
 import constant
@@ -76,30 +77,20 @@ def modify_ctlimit(agent_id, bigip):
         partition = partition_name(tenant_id)
 
         partition_vips = get_partition_vips(partition, lbs)
-        if DRYRUN:
-            for item in partition_vips:
-                vip = item['vip']
-                LOG.info("Get VIP: %s from Partition %s" %
-                         (vip.name, vip.partition))
-        else:
-            update_vip_limit(partition_vips)
 
+        update_vip_limit(partition_vips)
 
         partition_vss = vs_helper.get_resources(
             bigip, partition=partition)
-        if DRYRUN:
-            for vs in partition_vss:
-                LOG.info("Get VS: %s from Partition %s" %
-                         (vs.name, vs.partition))
-        else:
-            vs_limit = 0
-            update_vs_limit(partition_vss, partition, vs_limit)
+
+        vs_limit = 0
+        update_vs_limit(partition_vss, partition_vips, partition, vs_limit)
 
 def update_vip_limit(vips):
     if len(vips) != 0:
 
        pool = eventlet.greenpool.GreenPool()
-       for item in vips:
+       for item in vips.values():
            vip = item['vip']
            vip_limit = item['ct_limit']
            LOG.info(
@@ -107,11 +98,12 @@ def update_vip_limit(vips):
                " partition %s." % (vip_limit, vip.name, vip.partition)
            )
            try:
-               pool.spawn(vip.modify, connectionLimit=vip_limit)
+               if not DRYRUN:
+                   pool.spawn(vip.modify, connectionLimit=vip_limit)
            except Exception as ex:
                LOG.error(
                    "Fail to refresh virtual address %s"
-                   " connection limit %s." % (vs.name, limit)
+                   " connection limit %s." % (vs.name, vip_limit)
                )
                raise ex
        pool.waitall()
@@ -133,32 +125,55 @@ def get_partition_vips(partition, lbs):
 
         ct_limit  = constant.FLAVOR_CONN_MAP[str(lb.flavor)]['connection_limit']
 
+        ip_version = netaddr.IPAddress(lb.vip_address).version
+
         if vip is None:
             raise Exception("Cannot get vip %s in partition %s" % (name, partition))
         if ct_limit is None:
             raise Exception("Cannot get vip %s flavor %s connection limit" % (name, lb.flavor))
+        if ip_version is None:
+            raise Exception("Cannot vip_address from lb %s" % (name))
 
-        return {"vip": vip, "ct_limit": ct_limit}
+        if ip_version == 4:
+            rate_limit = 32
+        if ip_version == 6:
+            rate_limit = 128
+
+        return {"vip": vip, "ct_limit": ct_limit, "rt_limit": rate_limit}
 
 
-    partition_vips = []
+    partition_vips = {}
     pool = eventlet.greenpool.GreenPool()
     for result in pool.imap(fetch, lbs):
-        partition_vips.append(result)
+        name = result['vip'].name
+        partition_vips[name] = result
 
     return partition_vips
 
-def update_vs_limit(vss, partition, limit):
-    if len(vss) != 0:
-       LOG.info(
-           "Refresh connection limit %s for virtual servers of "
-           " partition %s." % (limit, partition)
-       )
+def get_vs_rt_limit(vips, vs):
+    vip_name  = vs.destination.split('/')[2].split(':')[0]
 
+    if vip_name not in vips:
+        raise Exception(
+            "The vip_name %s cannot be found in vips %s" % (
+                vip_name, vips
+            )
+        )
+    return vips[vip_name]['rt_limit']
+
+
+def update_vs_limit(vss, vips, partition, limit):
+    if len(vss) != 0:
        pool = eventlet.greenpool.GreenPool()
        for vs in vss:
            try:
-               pool.spawn(vs.modify, connectionLimit=limit)
+               rt_limit = get_vs_rt_limit(vips, vs)
+               LOG.info(
+                   "Modify vs %s, connection limit %s, rate limit %s" % (
+                   vs.name, limit, rt_limit)
+               )
+               if not DRYRUN:
+                   pool.spawn(vs.modify, connectionLimit=limit, rateLimitDstMask=rt_limit)
            except Exception as ex:
                LOG.error(
                    "Fail to refresh virtual server %s"
