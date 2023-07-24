@@ -13,8 +13,8 @@
 # limitations under the License.
 #
 
-from connection \
-    import Session
+from connection import Session
+from connection import db_conn
 import models
 
 
@@ -50,7 +50,8 @@ class Queries(object):
 
     def __init__(self):
 
-        self.connection = models.con
+        # self.connection = models.con
+        self.connection = db_conn
         self.lb = models.Loadbalancer
         self.ls = models.Listener
         self.pl = models.Pool
@@ -59,6 +60,13 @@ class Queries(object):
         self.bindings = models.Loadbalanceragentbindings
         self.subnet = models.Subnet
         self.net = models.Network
+        self.lbaasdevices = models.Lbaasdevices
+        self.Lbaasdevicemembers = models.Lbaasdevicemembers
+
+    def get_all_devices(self):
+        with Session(self.connection) as se:
+            ret = se.query(self.lbaasdevices).all()
+        return ret
 
     # @assign_rd_for("loadbalancers")
     def get_loadbalancers_by_agent_id(self, agent_id):
@@ -155,7 +163,7 @@ class Queries(object):
                 models.Subnet.network_id == net_id
             ).all()
         return ret
-      
+
     def get_rd_by_subnet(self, subnet_id):
         with Session(self.connection) as se:
             ret = se.query(self.subnet).get(

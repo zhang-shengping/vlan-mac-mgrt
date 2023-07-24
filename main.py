@@ -1,17 +1,13 @@
 # -*- coding: utf-8 -*-
 
-import eventlet
-eventlet.monkey_patch()
-
-import netaddr
-import queries
 import options
-import constant
-import requests
-from oslo_config import cfg
+
+from db import queries
+from ve_client import init_bigip
+from os_client import neutron_client
+
 from oslo_log import log as logging
 
-from f5.bigip import ManagementRoot
 import resource_helper
 import time
 
@@ -19,191 +15,212 @@ import requests
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
-from os_client import neutron_client
+from pprint import pprint
+
+# from os_client import neutron_client
 
 LOG = logging.getLogger(__name__)
-options.load_options()
-options.parse_options()
-conf = cfg.CONF
+conf = options.conf
 
-logging.setup(conf, "ConnectionLimitMigrate")
+logging.setup(conf, "Vlan MAC Migrate")
 
-agent_id = conf.f5_agent
-host_ip = conf.host_ip
-db_query = queries.Queries()
+def enable_dryrun():
+    return conf.dry_run
 
-if conf.environment_prefix:
-    partition_prefix = conf.environment_prefix + '_'
-else:
-    raise Exception("Cannot found partition prefix")
+# def get_db_client():
+#   return queries.Queries()
 
-def get_device_name(host, device_list):
-    if not device_list:
-        return
-    for device in device_list:
-        if host == device.managementIp:
-            return device.name
+def get_bigip_client():
+    return init_bigip()
 
-def init_bigip(host, user, passwd):
-    bigip = ManagementRoot(host, user, passwd)
-    devices = bigip.tm.cm.devices.get_collection()
-    device_name = get_device_name(host, devices)
-    if not device_name:
-        raise Exception("Cannot found device name for host %s" % host)
-    bigip.device_name = device_name
-    return bigip
+def get_neutron_client():
+    return neutron_client
 
-def resource_tree(agent_id):
-    tree = {agent_id: dict()}
-    agent_resource = tree[agent_id]
-
-    loadbalancers = db_query.get_loadbalancers_by_agent_id(agent_id)
-
-    for lb in loadbalancers:
-        if lb.project_id not in agent_resource:
-            agent_resource[lb.project_id] = [lb]
-        else:
-            agent_resource[lb.project_id] += [lb]
-
-    return agent_resource
-
-def modify_ctlimit(agent_id, bigip):
-    vs_helper = resource_helper.BigIPResourceHelper(
-        resource_helper.ResourceType.virtual)
-
-    tenant_resources = resource_tree(agent_id)
-
-    for tenant_id, lbs in tenant_resources.items():
-        partition = partition_name(tenant_id)
-
-        partition_vips = get_partition_vips(partition, lbs)
-
-        update_vip_limit(partition_vips)
-
-        partition_vss = vs_helper.get_resources(
-            bigip, partition=partition)
-
-        vs_limit = 0
-        update_vs_limit(partition_vss, partition_vips, partition, vs_limit)
-
-def update_vip_limit(vips):
-    if len(vips) != 0:
-
-       pool = eventlet.greenpool.GreenPool()
-       for item in vips.values():
-           vip = item['vip']
-           vip_limit = item['ct_limit']
-           LOG.info(
-               "Refresh connection limit %s for virtual address %s of "
-               " partition %s." % (vip_limit, vip.name, vip.partition)
-           )
-           try:
-               if not DRYRUN:
-                   pool.spawn(vip.modify, connectionLimit=vip_limit)
-           except Exception as ex:
-               LOG.error(
-                   "Fail to refresh virtual address %s"
-                   " connection limit %s." % (vs.name, vip_limit)
-               )
-               raise ex
-       pool.waitall()
-
-
-
-def get_partition_vips(partition, lbs):
-
-    vip_helper = resource_helper.BigIPResourceHelper(
-        resource_helper.ResourceType.virtual_address)
-
-    def fetch(lb):
-        name = vip_name(lb.id)
-        vip = vip_helper.load(
-            bigip,
-            partition=partition,
-            name=name
-        )
-
-        ct_limit  = constant.FLAVOR_CONN_MAP[str(lb.flavor)]['connection_limit']
-
-        ip_version = netaddr.IPAddress(lb.vip_address).version
-
-        if vip is None:
-            raise Exception("Cannot get vip %s in partition %s" % (name, partition))
-        if ct_limit is None:
-            raise Exception("Cannot get vip %s flavor %s connection limit" % (name, lb.flavor))
-        if ip_version is None:
-            raise Exception("Cannot vip_address from lb %s" % (name))
-
-        if ip_version == 4:
-            rate_limit = 32
-        if ip_version == 6:
-            rate_limit = 128
-
-        return {"vip": vip, "ct_limit": ct_limit, "rt_limit": rate_limit}
-
-
-    partition_vips = {}
-    pool = eventlet.greenpool.GreenPool()
-    for result in pool.imap(fetch, lbs):
-        name = result['vip'].name
-        partition_vips[name] = result
-
-    return partition_vips
-
-def get_vs_rt_limit(vips, vs):
-    vip_name  = vs.destination.split('/')[2].split(':')[0]
-
-    if vip_name not in vips:
-        raise Exception(
-            "The vip_name %s cannot be found in vips %s" % (
-                vip_name, vips
-            )
-        )
-    return vips[vip_name]['rt_limit']
-
-
-def update_vs_limit(vss, vips, partition, limit):
-    if len(vss) != 0:
-       pool = eventlet.greenpool.GreenPool()
-       for vs in vss:
-           try:
-               rt_limit = get_vs_rt_limit(vips, vs)
-               LOG.info(
-                   "Modify vs %s, connection limit %s, rate limit %s" % (
-                   vs.name, limit, rt_limit)
-               )
-               if not DRYRUN:
-                   pool.spawn(vs.modify, connectionLimit=limit, rateLimitDstMask=rt_limit)
-           except Exception as ex:
-               LOG.error(
-                   "Fail to refresh virtual server %s"
-                   " connection limit %s." % (vs.name, limit)
-               )
-               raise ex
-       pool.waitall()
-
-
-def partition_name(tenant_id):
-    if tenant_id is not None:
-        name = partition_prefix + tenant_id
+def get_environment_prefix():
+    if conf.environment_prefix:
+        partition_prefix = conf.environment_prefix + '_'
     else:
-        name = "Common"
-    return name
+        raise Exception("Cannot found partition prefix")
+    return partition_prefix
 
-def vip_name(lb_id):
-    name = partition_prefix + lb_id
-    return name
+def get_partitions(bigip):
+    helper = None
+    ret = []
+
+    helper = resource_helper.BigIPResourceHelper(
+        resource_helper.ResourceType.folder)
+    partition_objs = helper.get_resources(bigip)
+    prefix = get_environment_prefix()
+
+    return [ptn.name for ptn in partition_objs
+            if ptn.name.startswith(prefix)]
+
+def get_partition_selfips(bigip, partition):
+    helper = None
+    ret = []
+
+    helper = resource_helper.BigIPResourceHelper(
+        resource_helper.ResourceType.selfip
+    )
+    selfip_objs = helper.get_resources(
+        bigip, partition=partition)
+
+    return selfip_objs
+
+def validated_selfips(selfips):
+    ret = []
+    prefix = 'local-' + bigip.device_name + '-'
+
+    ret = [ip for ip in selfips
+           if ip.name.startswith(prefix)]
+
+    return ret
+
+def get_ve_selfips(bigip):
+    ret = []
+    ptns = get_partitions(bigip)
+
+    print("\ngether and format selfip port info in partitions %s from device %s" 
+          % (ptns, bigip.device_name))
+    for ptn in ptns:
+        selfip_objs = get_partition_selfips(bigip, ptn)
+        ret.extend(selfip_objs)
+
+    ret = validated_selfips(ret)
+    return ret
+
+def fmt_vlan_selfips(selfip_objs):
+    ret = {}
+
+    for selfip in selfip_objs:
+        vlan = selfip.vlan
+        name = selfip.name
+
+        if not ret.get(vlan, []):
+            ret[vlan] = [name]
+        else:
+            ret[vlan].append(name)
+
+    return ret
+
+def _valid_vlan_name(name):
+    if 'vlan-' in name:
+        return True
+    False
+
+def get_vlan_mac(bigip, partition, name):
+    helper = resource_helper.BigIPResourceHelper(
+        resource_helper.ResourceType.vlan)
+    stat_keys = ['macTrue']
+
+    stats = helper.get_stats(
+        bigip, partition=partition,
+        name=name, stat_keys=stat_keys
+    )
+    mac = stats['macTrue']
+
+    return mac
+
+def fmt_mac_selfips(bigip, vlan_selfips):
+    ret = {}
+
+    for k, v in vlan_selfips.items():
+        ptn, vlan = k.split("/")[1:]
+
+        if _valid_vlan_name(vlan):
+            mac_key = get_vlan_mac(
+                bigip, ptn, vlan
+            )
+            ret[mac_key] = v
+
+    return ret
+
+def _log_notfound_port(db_ports, ve_port_names):
+    db_port_names = [port['name'] for port in db_ports]
+
+    # NOTE: this is not possible by using ve selfip port to find port in db.
+    # the port is in db, but not in ve.
+    # ve_port_notfound = set(db_port_names) - set(ve_port_names)
+
+    # the port is in ve, but not in db.
+    db_port_notfound = set(ve_port_names) - set(db_port_names)
+
+    # ve_notfound.extend(list(ve_port_notfound))
+    db_notfound.extend(list(db_port_notfound))
+
+def update_mac(mac, port):
+
+    port_bind_porfile = port['binding:profile']
+    local_link_info = port_bind_porfile['local_link_information']
+    info = local_link_info[0]
+    node_vtep_ip = info.get("node_vtep_ip")
+
+    # NOTE: if network without vtep? use the default mac???
+    # if node_vtep_ip:
+        # info['lb_mac'] = 'test_pzhang'
+    info['lb_mac'] = mac
+    port_id = port['id']
+    patch = {'port':{'binding:profile': port_bind_porfile}}
+
+    print("\n update port %s" % port['name'])
+    pprint(patch)
+    if not enable_dryrun():
+        port = neutron_cli.update_port(port_id, patch)
+
+def update_selfip_ports(mac_selfips):
+
+    print("\nsearch port and update selfip ports 'lb_mac'")
+    for mac, port_names in mac_selfips.items():
+        ports = neutron_cli.list_ports(name=port_names)
+        ports = ports.get("ports", [])
+
+        _log_notfound_port(ports, port_names)
+
+        for port in ports:
+            update_mac(mac, port)
+
 
 if __name__ == "__main__":
-    DRYRUN=conf.dry_run
-    bigip = init_bigip(host_ip, conf.icontrol_username, conf.icontrol_password)
+    """
+    this tool collects all the selfips in lbaas agent
+    environment_prefixed partitions of the targeted bigip host.
 
-    a = requests.adapters.HTTPAdapter(pool_maxsize=1)
-    bigip.icrs.session.mount('https://', a)
+    validate the selfips with 'local-<device_name>-'
+    validate the vlan with 'vlan-'
 
+    update neutron selfip port mac by using mac selfip map.
+    only the ports with vtep ip will be updated.
+    """
     start = time.time()
-    modify_ctlimit(agent_id, bigip)
+
+    # ve_notfound = []
+    db_notfound = []
+
+    print("\ncollecting and processing info, please wait.")
+
+    # gether mac-selfips map from bigips
+    bigip = get_bigip_client()
+    selfip_objs = get_ve_selfips(bigip)
+    vlan_selfips = fmt_vlan_selfips(selfip_objs)
+    mac_selfips = fmt_mac_selfips(bigip, vlan_selfips)
+
+    print("\n------ we will update these Vlan Seflips ------")
+    pprint(vlan_selfips)
+
+    print("\n------ we will update these MACs for Neutron Port ------")
+    pprint(mac_selfips)
+
+    # according to the mac-selfips map to update neutron ports
+    neutron_cli = get_neutron_client()
+    if enable_dryrun():
+        print("\nConfiguration will NOT issued, in dry run mode.")
+    update_selfip_ports(mac_selfips)
+
+    # print("------ these ports cannot be found in Bigip VE ------")
+    # pprint(ve_notfound)
+    print("\n------ these ports cannot be found in Neutron DB ------")
+    pprint(db_notfound)
+
     end = time.time()
     elapse = end - start
-    LOG.info("Finish migrating for BigIP %s. Time elapse %s" % (bigip.hostname, elapse))
-
+    print("\nFinish update selfip port for BigIP %s. Time elapse %s second" % (bigip.hostname, elapse))

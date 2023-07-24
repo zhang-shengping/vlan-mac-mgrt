@@ -13,21 +13,28 @@
 # limitations under the License.
 #
 
-import connection
-import options
-from oslo_config import cfg
-
+from connection import db_conn
 from sqlalchemy import Column, String, ForeignKey
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import backref
 
-options.load_db_options()
-options.parse_options()
-conf = cfg.CONF
+Base = db_conn.base
+# metadata = Base.metadata
 
-con = connection.Connection(conf)
-Base = con.base
-metadata = Base.metadata
+
+class Lbaasdevices(Base):
+    __tablename__ = "lbaas_devices"
+    __table_args__ = {'autoload': True}
+
+
+class Lbaasdevicemembers(Base):
+    __tablename__ = "lbaas_device_members"
+    __table_args__ = {'autoload': True}
+
+
+class Ports(Base):
+    __tablename__ = "ports"
+    __table_args__ = {'autoload': True}
 
 
 class Loadbalanceragentbindings(Base):

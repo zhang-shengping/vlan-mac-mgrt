@@ -17,8 +17,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session
 
+import options
 import eventlet
 eventlet.monkey_patch(thread=True)
+
+conf = options.conf
 
 
 def get_engine(conf):
@@ -60,3 +63,5 @@ class Session(object):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.scope_session.remove()
+
+db_conn = Connection(conf)

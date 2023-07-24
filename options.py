@@ -15,22 +15,26 @@
 
 from oslo_config import cfg
 import sys
+from oslo_db.options import database_opts
+from f5_openstack_agent.lbaasv2.drivers.bigip.opts import \
+    OPTS as f5_opts
 
-# require f5 agent is installed
-import f5_openstack_agent.lbaasv2.drivers.bigip.agent_manager as manager
-from f5_openstack_agent.lbaasv2.drivers.bigip import icontrol_driver
-from oslo_db import options
 
 tool_opts = [
-    cfg.StrOpt("f5-agent",
-               short="ag",
-               default=None,
-               help=("Provide an ID of an agent")),
-
     cfg.StrOpt("host-ip",
                short="ip",
-               default=None,
-               help=("Provide bigip host ip")),
+               default="",
+               help=("Provide VE host ip")),
+
+    cfg.StrOpt("user",
+               short="u",
+               default="",
+               help=("Provid VE admin username")),
+
+    cfg.StrOpt("password",
+               short="p",
+               default="",
+               help=("Provider VE admin password")),
 
     cfg.BoolOpt("dry-run",
                 short="dr",
@@ -38,19 +42,102 @@ tool_opts = [
                 help=("Run for test"))
 ]
 
-cfg.CONF.register_cli_opts(tool_opts)
+auth_opts = [
+    cfg.StrOpt(
+            'auth_url',
+            help=_('Authentication endpoint'),
+        ),
+    cfg.StrOpt(
+            'admin_user',
+            default='admin',
+            help=_('The service admin user name'),
+        ),
+    cfg.StrOpt(
+            'admin_tenant_name',
+            default='admin',
+            help=_('The service admin tenant name'),
+        ),
+    cfg.StrOpt(
+            'admin_password',
+            secret=True,
+            default='password',
+            help=_('The service admin password'),
+        ),
+    cfg.StrOpt(
+            'admin_user_domain',
+            default='admin',
+            help=_('The admin user domain name'),
+        ),
+    cfg.StrOpt(
+            'admin_project_domain',
+            default='admin',
+            help=_('The admin project domain name'),
+        ),
+    cfg.StrOpt(
+            'region',
+            # default='RegionOne',
+            default='',
+            help=_('The deployment region'),
+        ),
+    cfg.StrOpt(
+            'service_name',
+            default='lbaas',
+            help=_('The name of the service'),
+        ),
+    cfg.StrOpt(
+            'auth_version',
+            default='3',
+            help=_('The auth version used to authenticate'),
+        ),
+    cfg.StrOpt(
+            'endpoint_type',
+            default='public',
+            help=_('The endpoint_type to be used')
+        ),
+    cfg.BoolOpt(
+            'insecure',
+            default=False,
+            help=_('Disable server certificate verification')
+        )
+]
 
+conf = cfg.CONF
 
-def load_options(conf=cfg.CONF):
-    conf.register_opts(manager.OPTS)
-    conf.register_opts(icontrol_driver.OPTS)
+# set tool cli opts
+conf.register_cli_opts(tool_opts)
 
+# set lbaas agent opts
+conf.register_opts(f5_opts)
 
-def load_db_options(conf=cfg.CONF):
-    options.set_defaults(conf)
+# set neutron db opts
+conf.register_opts(database_opts, group='database')
 
+# set neutron server client opts
+conf.register_opts(auth_opts, 'service_auth')
 
 def parse_options(args=sys.argv[1:],
-                  conf=cfg.CONF,
-                  project="f5-agent-auditor"):
-    conf(args, project)
+              # conf=cfg.CONF,
+              project="vlan-mac-mgrt"):
+    cfg.CONF(args, project)
+    return cfg.CONF
+
+parse_options()
+
+if __name__ == "__main__":
+    print("\n----- Neutron client OPTS -----")
+    print("auth_url: " +  conf.service_auth.auth_url)
+    print("admin_user: " + conf.service_auth.admin_user)
+    print("admin_password: " + conf.service_auth.admin_password)
+    print("admin_tenant: " + conf.service_auth.admin_tenant_name)
+    print("region: " + conf.service_auth.region)
+
+    print("\n----- Neutron DB OPTS -----")
+    print("DB connection: " + conf.database.connection)
+
+    print("\n----- VE client OPTS -----")
+    print("host ip: " + conf.host_ip)
+    print("user: " + conf.user)
+    print("password: " + conf.password)
+
+    print("\n----- iControl OPTS -----")
+    print("environment prefix: " + conf.environment_prefix)
